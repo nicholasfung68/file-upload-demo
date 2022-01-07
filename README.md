@@ -19,7 +19,7 @@
 yarn install
 ```
 
-### 运行项目
+## 运行项目
 ```
 yarn start
 ```
