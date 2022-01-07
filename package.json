@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "server": "rm -r target/* & nodemon server/server.js",
+    "start": "rm -r target/* & vue-cli-service serve & nodemon server/server.js",
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint"
   },
   "dependencies": {
     "core-js": "^3.6.5",
+    "element-ui": "^2.15.6",
+    "multiparty": "^4.2.2",
     "vue": "^2.6.11"
   },
   "devDependencies": {
@@ -18,6 +22,7 @@
     "babel-eslint": "^10.1.0",
     "eslint": "^6.7.2",
     "eslint-plugin-vue": "^6.2.2",
+    "nodemon": "^2.0.15",
     "vue-template-compiler": "^2.6.11"
   },
   "eslintConfig": {
