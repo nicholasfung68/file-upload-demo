@@ -2,10 +2,15 @@
   <div id="app">
     <h1>文件上传demo</h1>
 
-    <section>
+    <section class="upload-file">
       <h2>上传文件</h2>
       <input type="file" @change="handleFileChange">
       <el-button @click="handleUpload">上传</el-button>
+    </section>
+
+    <section class="file-hash-progress">
+      <h2>计算文件hash</h2>
+      <el-progress :percentage="hashPercentage"></el-progress>
     </section>
 
     <section class="total-upload-progress">
@@ -40,10 +45,13 @@ export default {
   data() {
     return {
       container: {
-        file: null
+        worker: null,
+        file: null,
+        hash: ''
       },
       data: [],
-      fakeUploadPercentage: 0
+      fakeUploadPercentage: 0,
+      hashPercentage: 0
     }
   },
   filters: {
@@ -116,6 +124,7 @@ export default {
           formData.append('chunk', chunk)
           formData.append('hash', hash)
           formData.append('filename', this.container.file.name)
+          formData.append('fileHash', this.container.hash)
           return { formData, index }
         })
         .map(async ({ formData, index }) => {
@@ -137,7 +146,8 @@ export default {
         },
         data: JSON.stringify({
           size: SIZE,
-          filename: this.container.file.name
+          filename: this.container.file.name,
+          fileHash: this.container.hash
         })
       })
       this.$message.success('上传成功')
@@ -147,12 +157,14 @@ export default {
         return this.$message.warning('未选择文件！')
       }
       const fileChunkList = this.createFileChunk(this.container.file)
+      this.container.hash = await this.calculateHash(fileChunkList)
       this.data = fileChunkList.map(({ file }, index) => ({
+        fileHash: this.container.hash,
         index,
         percentage: 0,
         size: file.size,
         chunk: file,
-        hash: this.container.file.name + '-' + index // 文件名 + 数组下标
+        hash: this.container.hash + '-' + index // 文件hash + 数组下标
       }))
       await this.uploadChunks()
     },
@@ -160,6 +172,21 @@ export default {
       return p => {
         item.percentage = parseInt(String((p.loaded / p.total) * 100))
       }
+    },
+    // 生成文件hash （web-worker）
+    calculateHash(fileChunkList) {
+      return new Promise((resolve) => {
+        // 添加worker属性
+        this.container.worker = new Worker('/hash.js')
+        this.container.worker.postMessage({ fileChunkList })
+        this.container.worker.onmessage = (e) => {
+          const { percentage, hash } = e.data
+          this.hashPercentage = percentage
+          if (hash) {
+            resolve(hash)
+          }
+        }
+      })
     }
   }
 }
@@ -173,6 +200,8 @@ export default {
   -moz-osx-font-smoothing: grayscale;
   color: #2c3e50;
 }
+
+.file-hash-progres,
 .total-upload-progress,
 .slice-upload-progress {
   padding-top: 20px;

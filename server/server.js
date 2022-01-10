@@ -6,6 +6,8 @@ const multiparty = require('multiparty') // 使用multiparty包处理前端传�
 const server = http.createServer()
 const UPLOAD_DIR = path.resolve(__dirname, '..', 'target') // 上传文件存储目录
 
+const extractExt = (filename) => filename.slice(filename.lastIndexOf('.'), filename.length) // 提取后缀名
+
 const resolvePost = (req) => {
   return new Promise((resolve) => {
     let chunk = ''
@@ -33,28 +35,23 @@ const pipeStream = (path, writeStream) => {
 }
 
 // 合并切片
-const mergeFileChunk = async (filePath, filename, size) => {
+const mergeFileChunk = async (filePath, fileHash, size) => {
   const chunkDir = path.resolve(UPLOAD_DIR)
-  // 暂时不知道为啥，使用setTimeout才能读取到目录内的文件，否则读取到的是空的……待解决
-  setTimeout(async () => {
-    const chunkPaths = await fse.readdir(chunkDir)
-    // 根据切片下标进行排序，否则直接读取目录获得的顺序可能会错乱
-    chunkPaths.sort((a, b) => a.split('-')[1] - b.split('-')[1])
-    await Promise.all(
-      chunkPaths.map((chunkPath, index) => {
-        pipeStream(
-          path.resolve(chunkDir, chunkPath),
-          // 指定位置创建可写流
-          fse.createWriteStream(filePath, {
-            start: index * size,
-            end: (index + 1) * size
-          })
-        )
-      })
-    )
-    // // rmdirSync 方法 删除文件夹
-    // fse.rmdirSync(chunkDir) // 合并后删除保存切片的目录
-  }, 1000)
+  const chunkPaths = await fse.readdir(chunkDir)
+  // 根据切片下标进行排序，否则直接读取目录获得的顺序可能会错乱
+  chunkPaths.sort((a, b) => a.split('-')[1] - b.split('-')[1])
+  await Promise.all(
+    chunkPaths.map((chunkPath, index) => {
+      pipeStream(
+        path.resolve(chunkDir, chunkPath),
+        // 指定位置创建可写流
+        fse.createWriteStream(filePath, {
+          start: index * size,
+          end: (index + 1) * size
+        })
+      )
+    })
+  )
 }
 
 // 处理分片文件上传 form-data
@@ -65,14 +62,22 @@ const handleFormData = async (req, res) => {
     if (err) {
       console.error('handle formdata error: ', err)
       res.status = 500
-      res.end(err)
+      res.end('出错了……')
       return
     }
 
     const [chunk] = files.chunk
     const [hash] = fields.hash
-    // const [filename] = fields.filename
+    const [fileHash] = fields.fileHash
+    const [filename] = fields.filename
+    const filePath = path.resolve(UPLOAD_DIR, `${fileHash}${extractExt(filename)}`)
     const chunkDir = path.resolve(UPLOAD_DIR)
+
+    // 文件存在直接返回
+    if (fse.existsSync(filePath)) {
+      res.end('file exist')
+      return
+    }
 
     // 切片目录不存在则创建切片目录
     // existsSync 同步检查给定路径中是​​否已存在文件，返回值是布尔值
@@ -92,9 +97,10 @@ const handleFormData = async (req, res) => {
 // 处理合并切片
 const handleMerge = async (req, res) => {
   const data = await resolvePost(req)
-  const { filename, size } = data
-  const filePath = path.resolve(UPLOAD_DIR, `${filename}`)
-  await mergeFileChunk(filePath, filename, size)
+  const { fileHash, filename, size } = data
+  const ext = extractExt(filename)
+  const filePath = path.resolve(UPLOAD_DIR, `${fileHash}${ext}`)
+  await mergeFileChunk(filePath, fileHash, size)
   res.end(
     JSON.stringify({
       code: 0,
