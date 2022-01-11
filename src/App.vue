@@ -4,8 +4,14 @@
 
     <section class="upload-file">
       <h2>上传文件</h2>
-      <input type="file" @change="handleFileChange">
-      <el-button @click="handleUpload">上传</el-button>
+      <input type="file" :disabled="status !== Status.wait" @change="handleFileChange">
+      <el-button :disabled="uploadDisabled" @click="handleUpload">上传</el-button>
+      <el-button v-if="status === Status.pause" @click="handleResume">恢复</el-button>
+      <el-button
+        v-else
+        :disabled="status !== Status.uploading || !container.hash"
+        @click="handlePause"
+      >暂停</el-button>
     </section>
 
     <section class="file-hash-progress">
@@ -38,20 +44,31 @@
 </template>
 
 <script>
-const SIZE = 10 * 1024 * 1024 // 分片大小
+const SIZE = 10 * 1024 * 1024 // 分片大小 10MB
+
+const Status = {
+  wait: 'wait',
+  pause: 'pause',
+  uploading: 'uploading'
+}
 
 export default {
   name: 'App',
   data() {
     return {
+      Status,
       container: {
         worker: null,
         file: null,
         hash: ''
       },
       data: [],
+      // 当暂停时会取消 xhr 导致进度条后退
+      // 为了避免这种情况，需要定义一个假的进度条
       fakeUploadPercentage: 0,
-      hashPercentage: 0
+      hashPercentage: 0,
+      requestList: [],
+      status: Status.wait
     }
   },
   filters: {
@@ -60,6 +77,12 @@ export default {
     }
   },
   computed: {
+    uploadDisabled() {
+      return  (
+        !this.container.file ||
+        [Status.pause, Status.uploading].includes(this.status)
+      )
+    },
     uploadPercentage() {
       if (!this.container.file || !this.data.length) {
         return 0
@@ -76,13 +99,20 @@ export default {
     }
   },
   methods: {
+    resetData() {
+      this.requestList.forEach(xhr => xhr?.abort())
+      this.requestList.splice(0)
+      if (this.container.worker) {
+        this.container.worker.onmessage = null
+      }
+    },
     request({
       url,
       method = 'post',
       data,
       headers = {},
       onProgress = p => p,
-      // requestList
+      requestList
     }) {
       return new Promise(resolve => {
         const xhr = new XMLHttpRequest()
@@ -93,15 +123,22 @@ export default {
         })
         xhr.send(data)
         xhr.onload = e => {
+          // 将请求成功的xhr从列表中删除
+          if (requestList) {
+            const xhrIndex = requestList.findIndex(i => i === xhr)
+            requestList.splice(xhrIndex, 1)
+          }
           resolve({
             data: e.target.response
           })
         }
+        requestList?.push(xhr) // 暴露当前xhr给外部
       })
     },
     handleFileChange(e) {
       const [file] = e.target.files
       if (!file) return
+      this.resetData()
       Object.assign(this.$data, this.$options.data()) // 恢复初始化的数据
       this.container.file = file
     },
@@ -116,8 +153,9 @@ export default {
       return fileChunkList
     },
     // 上传切片，同时过滤已上传的切片
-    async uploadChunks() {
+    async uploadChunks(uploadedList = []) {
       const requestList = this.data
+        .filter(({ hash }) => !uploadedList.includes(hash))
         .map(({ chunk, hash, index }) => {
           // 处理formData
           const formData = new FormData()
@@ -130,13 +168,17 @@ export default {
         .map(async ({ formData, index }) => {
           // 分片上传
           this.request({
-            url: 'http://localhost:3001',
+            url: 'http://localhost:3001/upload',
             data: formData,
-            onProgress: this.createProgressHandler(this.data[index])
+            onProgress: this.createProgressHandler(this.data[index]),
+            requestList: this.requestList
           })
         })
       await Promise.all(requestList)
-      await this.mergeRequest() // 合并切片
+      // 之前上传的切片数量 + 本次上传的切片数量 = 所有的切片数量时， 合并切片
+      if (uploadedList.length + requestList.length === this.data.length) {
+        await this.mergeRequest() // 合并切片
+      }
     },
     async mergeRequest() {
       await this.request({
@@ -151,13 +193,27 @@ export default {
         })
       })
       this.$message.success('上传成功')
+      this.status = Status.wait
     },
     async handleUpload() {
       if (!this.container.file) {
         return this.$message.warning('未选择文件！')
       }
+      this.status = Status.uploading
       const fileChunkList = this.createFileChunk(this.container.file)
       this.container.hash = await this.calculateHash(fileChunkList)
+
+      const { shouldUpload, uploadedList } = await this.verifyUpload(
+        this.container.file.name,
+        this.container.hash
+      )
+
+      if (!shouldUpload) {
+        this.status = Status.wait
+        this.$message.success('秒传：上传成功')
+        return
+      }
+
       this.data = fileChunkList.map(({ file }, index) => ({
         fileHash: this.container.hash,
         index,
@@ -166,8 +222,22 @@ export default {
         chunk: file,
         hash: this.container.hash + '-' + index // 文件hash + 数组下标
       }))
-      await this.uploadChunks()
+      await this.uploadChunks(uploadedList)
     },
+    // 暂停上传，原理是使用 XMLHttpRequest 的 abort 方法，可以取消一个 xhr 请求的发送
+    handlePause() {
+      this.status = Status.pause
+      this.resetData()
+    },
+    async handleResume() {
+      this.status = Status.uploading
+      const { uploadedList } = await this.verifyUpload(
+        this.container.file.name,
+        this.container.hash
+      )
+      await this.uploadChunks(uploadedList)
+    },
+    // 用闭包保存每个 chunk 的进度数据
     createProgressHandler(item) {
       return p => {
         item.percentage = parseInt(String((p.loaded / p.total) * 100))
@@ -176,17 +246,31 @@ export default {
     // 生成文件hash （web-worker）
     calculateHash(fileChunkList) {
       return new Promise((resolve) => {
-        // 添加worker属性
+        console.time('生成文件hash耗时：')
         this.container.worker = new Worker('/hash.js')
         this.container.worker.postMessage({ fileChunkList })
         this.container.worker.onmessage = (e) => {
           const { percentage, hash } = e.data
           this.hashPercentage = percentage
           if (hash) {
+            console.timeEnd('生成文件hash耗时：')
             resolve(hash)
           }
         }
       })
+    },
+    async verifyUpload(filename, fileHash) {
+      const { data } = await this.request({
+        url: 'http://localhost:3001/verify',
+        headers: {
+          'content-type': 'application/json'
+        },
+        data: JSON.stringify({
+          filename,
+          fileHash
+        })
+      })
+      return JSON.parse(data)
     }
   }
 }
